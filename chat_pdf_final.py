@@ -9,7 +9,11 @@ load_dotenv()             # .env file se API key lo
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))  # Claude ka middleman banao
 model = SentenceTransformer('all-MiniLM-L6-v2')  # Embedding model load karo
 
-reader = PdfReader("Claude.pdf")   # PDF kholo
+try:
+    reader = PdfReader("Claude.pdf")
+except FileNotFoundError:
+    print("Error: PDF file nahi mili!")
+    exit()   # PDF kholo
 full_text = ""                     # Khali string shuru karo
 for i in range(len(reader.pages)): # Har page pe loop
     full_text += reader.pages[i].extract_text()  # Page ka text add karo
@@ -24,13 +28,23 @@ for i, chunk in enumerate(chunks):             # Har chunk pe loop
     embedding = model.encode(chunk).tolist()   # Chunk ko numbers mein convert karo
     collection.add(documents=[chunk], embeddings=[embedding], ids=[f"chunk_{i}"])  # Store karo
 
-while True:                        # Hamesha chalta rahe
-    query = input("Sawaal: ")      # User se sawaal lo
-    if query.lower() == "exit":    # Agar "exit" likha
-        break                      # Loop band karo
+while True:
+    query = input("Sawaal (exit ke liye 'exit'): ")
+    
+    if not query.strip():
+        print("Kuch toh pooch!")
+        continue
+        
+    if query.lower() == "exit":
+        print("Goodbye!")
+        break                     # Loop band karo
 
     query_embedding = model.encode(query).tolist()  # Sawaal ko numbers mein convert karo
-    results = collection.query(query_embeddings=[query_embedding], n_results=2)  # Similar chunks dhundho
+    results = collection.query(query_embeddings=[query_embedding], n_results=2)
+
+    if not results['documents'][0]:
+      print("Koi relevant chunk nahi mila. Doosra sawaal pooch.")
+      continue
 
     context = ""                   # Khali context
     for chunk in results['documents'][0]:   # Mile hue chunks pe loop
