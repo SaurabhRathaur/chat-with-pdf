@@ -1,16 +1,23 @@
 from flask import Flask, request, render_template
-import anthropic, os, chromadb, voyageai
+import anthropic, os, chromadb
 from dotenv import load_dotenv
 from pypdf import PdfReader
 
 load_dotenv()
 
 anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-voyage_client = voyageai.Client(api_key=os.getenv("VOYAGE_API_KEY"))
 chroma_client = chromadb.Client()
 collection = None
+model = None
 
 app = Flask(__name__)
+
+def get_model():
+    global model
+    if model is None:
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+    return model
 
 @app.route("/")
 def home():
@@ -30,16 +37,11 @@ def upload():
     for i in range(0, len(full_text), 400):
         chunks.append(full_text[i:i+500])
 
-    result = voyage_client.embed(chunks, model="voyage-3-lite")
-    embeddings = result.embeddings
-
+    m = get_model()
     collection = chroma_client.get_or_create_collection(name="pdf_chunks")
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-        collection.add(
-            documents=[chunk],
-            embeddings=[embedding],
-            ids=[f"chunk_{i}"]
-        )
+    for i, chunk in enumerate(chunks):
+        embedding = m.encode(chunk).tolist()
+        collection.add(documents=[chunk], embeddings=[embedding], ids=[f"chunk_{i}"])
 
     return render_template("index.html", message=f"PDF upload ho gayi! {len(chunks)} chunks ready.")
 
@@ -50,12 +52,11 @@ def ask():
         return render_template("index.html", answer="Pehle PDF upload karo!")
 
     question = request.form["question"]
-    result = voyage_client.embed([question], model="voyage-3-lite")
-    query_embedding = result.embeddings[0]
-
+    m = get_model()
+    query_embedding = m.encode(question).tolist()
     results = collection.query(query_embeddings=[query_embedding], n_results=2)
-    context = "".join(results['documents'][0])
 
+    context = "".join(results['documents'][0])
     response = anthropic_client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,
