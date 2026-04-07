@@ -1,128 +1,82 @@
-from pypdf import PdfReader
-
-reader = PdfReader("Claude.pdf")
-
-'''print(f"Total pages: {len(reader.pages)}")
-
-for i in range(0,len(reader.pages)):
-   page = reader.pages[i] 
-   text = page.extract_text() 
-   print(text)'''
-
-full_text = ""
-for i in range(len(reader.pages)):
-    page = reader.pages[i]
-    full_text += page.extract_text()
-
-print(len(full_text))
-
-chunk_size = 500
-chunks = []
-
-for i in range(0, len(full_text), chunk_size):
-    chunk = full_text[i:i+chunk_size]
-    chunks.append(chunk)
-
-print(f"Total chunks: {len(chunks)}")
-print(f"Pehla chunk:\n{chunks[0]}")
-print(f"\nDoosra chunk:\n{chunks[1]}")
-
-from sentence_transformers import SentenceTransformer
-
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-embedding = model.encode(chunks[0])
-
-print(f"Embedding size: {len(embedding)}")
-print(f"Pehle 5 numbers: {embedding[:5]}")
-
-import chromadb
-
-chroma_client = chromadb.Client()
-collection = chroma_client.create_collection(name="pdf_chunks")
-
-for i, chunk in enumerate(chunks):
-    embedding = model.encode(chunk).tolist()
-    collection.add(
-        documents=[chunk],
-        embeddings=[embedding],
-        ids=[f"chunk_{i}"]
-    )
-
-print(f"Total chunks stored: {collection.count()}")
-
-query = "What is a skill?"
-query_embedding = model.encode(query).tolist()
-
-results = collection.query(
-    query_embeddings=[query_embedding],
-    n_results=2
-)
-
-print(results['documents'])
-
 import anthropic
 import os
+import chromadb
 from dotenv import load_dotenv
+from pypdf import PdfReader
+from sentence_transformers import SentenceTransformer
+from rank_bm25 import BM25Okapi
 
 load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
-context = results['documents'][0][0] + results['documents'][0][1]
+# PDF padhna
+reader = PdfReader("Claude.pdf")
+full_text = ""
+for page in reader.pages:
+    full_text += page.extract_text()
 
-response = client.messages.create(
-    model="claude-haiku-4-5-20251001",
-    max_tokens=1024,
-    messages=[{
-        "role": "user",
-        "content": f"Context:\n{context}\n\nSawaal: What is a skill?"
-    }]
-)
+# Chunking — 500 chars, 100 overlap
+chunks = []
+for i in range(0, len(full_text), 400):
+    chunks.append(full_text[i:i+500])
 
-print(response.content[0].text)
+# BM25 ke liye chunks tokenize karo
+tokenized_chunks = [chunk.lower().split() for chunk in chunks]
+bm25 = BM25Okapi(tokenized_chunks)
 
-query = input(f"user: ")
-query_embedding = model.encode(query).tolist()
+# ChromaDB mein store
+chroma_client = chromadb.Client()
+collection = chroma_client.create_collection(name="pdf_chunks")
+for i, chunk in enumerate(chunks):
+    embedding = model.encode(chunk).tolist()
+    collection.add(documents=[chunk], embeddings=[embedding], ids=[f"chunk_{i}"])
 
-results = collection.query(
-    query_embeddings=[query_embedding],
-    n_results=2
-)
+print(f"✅ {len(chunks)} chunks store ho gaye!")
 
-while True:
-    query = input("Sawaal (exit likh ke bahar niklo): ")
-
-    if query.lower() == "exit":
-        print("Goodbye bhai 👋")
-        break
-
-    # Query ka embedding
+def hybrid_search(query, n_results=2):
+    # BM25 search
+    tokenized_query = query.lower().split()
+    bm25_scores = bm25.get_scores(tokenized_query)
+    top_bm25_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:n_results]
+    bm25_chunks = [chunks[i] for i in top_bm25_indices]
+    
+    # Vector search
     query_embedding = model.encode(query).tolist()
+    results = collection.query(query_embeddings=[query_embedding], n_results=n_results)
+    vector_chunks = results['documents'][0]
+    
+    # Combine — duplicates hatao
+    seen = set()
+    combined = []
+    for chunk in bm25_chunks + vector_chunks:
+        if chunk not in seen:
+            seen.add(chunk)
+            combined.append(chunk)
+    
+    return combined
 
-    # ChromaDB se relevant chunks nikaalo
-    results = collection.query(query_embeddings=[query_embedding], n_results=2)
+# Chat loop
+while True:
+    query = input("\nSawaal (exit ke liye 'exit'): ")
+    
+    if query.lower() == "exit":
+        print("Goodbye! 👋")
+        break
+    
+    if not query.strip():
+        print("Kuch toh pooch!")
+        continue
 
-    # Context banaao
-    context = ""
-    for chunk in results['documents'][0]:
-        context += chunk + "\n"
-
-    # Claude ko bhejne ke liye prompt
-    messages = [
-        {
-            "role": "user",
-            "content": f"Context:\n{context}\n\nQuestion:\n{query}"
-        }
-    ]
+    relevant_chunks = hybrid_search(query)
+    context = "\n".join(relevant_chunks)
 
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,
-        messages=messages
+        messages=[{"role": "user", "content": f"Context:\n{context}\n\nSawaal: {query}"}]
     )
 
-    # Answer print karo
-    print("\nAnswer:")
-    print(response.content[0].text)
+    print(f"\nAnswer:\n{response.content[0].text}")
     print("-" * 50)
